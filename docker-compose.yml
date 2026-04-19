@@ -1,28 +1,34 @@
-version: "3.3"
+# docker-compose.yml — Generated for Spring Boot + Angular
+version: '3.8'
+
 services:
-  employee:
+
+  backend:
     build:
-      context: apps/employee-service
+      context: ./apps/employee-service
+      dockerfile: Dockerfile
+    container_name: app_backend
     ports:
-      - 8080:8080
+      - "8080:8080"
     environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://db/employees
-      SPRING_DATASOURCE_USERNAME: employees
-      SPRING_DATASOURCE_PASSWORD: employees
-  employee-front-end:
+      - SPRING_PROFILES_ACTIVE=prod
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  frontend:
     build:
-      context: apps/employee-front-end
+      context: ./apps/employee-front-end
+      dockerfile: Dockerfile
+    container_name: app_frontend
     ports:
-      - 4200:80
-  db:
-    build: tools/postgresql
-    ports:
-      - 15432:5432
-    volumes:
-      - postgressVolume:/var/lib/postgresql/data
-    environment:
-      POSTGRES_MULTIPLE_DATABASES: employees,employees-test
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: admin
-volumes:
-  postgressVolume:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - app-network
+    restart: unless-stopped
+
+networks:
+  app-network:
+    driver: bridge

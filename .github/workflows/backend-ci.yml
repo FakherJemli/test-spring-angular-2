@@ -18,14 +18,6 @@ jobs:
     defaults:
       run:
         working-directory: ./apps/employee-service
-    services:
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_DB: employee_db
-          POSTGRES_USER: employee_user
-          POSTGRES_PASSWORD: employee_password
-        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -38,12 +30,6 @@ jobs:
           cache-dependency-path: ./apps/employee-service/pom.xml
 
       - name: Build (tests skipped by default)
-        env:
-          POSTGRES_DB: employee_db
-          POSTGRES_USER: employee_user
-          POSTGRES_PASSWORD: employee_password
-          POSTGRES_HOST: postgres
-          POSTGRES_PORT: 5432
         run: mvn -B -DskipTests package
       #   mvn -B verify
 

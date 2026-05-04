@@ -1,3 +1,4 @@
+# Generated Dockerfile — Spring Boot (Maven / Java 17)
 FROM maven:3.9-eclipse-temurin-17 AS build
 WORKDIR /workspace
 COPY pom.xml .
@@ -9,5 +10,4 @@ FROM eclipse-temurin:17-jre-alpine
 WORKDIR /app
 COPY --from=build /workspace/target/*.jar /app/app.jar
 EXPOSE 8080
-HEALTHCHECK CMD curl -f http://localhost:8080/actuator/health || exit 1
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]

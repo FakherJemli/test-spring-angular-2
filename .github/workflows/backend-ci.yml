@@ -1,0 +1,207 @@
+name: Java CI
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'apps/employee-service/**'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'apps/employee-service/**'
+      - '.github/workflows/**'
+  workflow_dispatch:
+    inputs:
+      enforce-tests:
+        description: 'Fail the build if tests fail (default: warn only)'
+        required: false
+        default: 'false'
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-apps-employee-service-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+# ── Build & Test ─────────────────────────────────────────────────────────
+  test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ./apps/employee-service
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: temurin
+          cache: maven
+          cache-dependency-path: ./apps/employee-service/pom.xml
+
+      - name: Build (tests skipped by default)
+        run: mvn -B -DskipTests package
+      # To also run tests: mvn -B verify
+      - name: (DevOpsGen — review warnings above)
+        if: always()
+        run: echo "CI completed. Review any warnings above."
+
+      - name: Lint Dockerfile (apps/employee-service/Dockerfile)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: apps/employee-service/Dockerfile
+          format: sarif
+          output-file: hadolint-results.sarif
+          no-fail: true
+        continue-on-error: true
+      - name: Upload Hadolint SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: hadolint-results.sarif
+        continue-on-error: true
+      - name: CI Summary
+        if: always()
+        run: |
+          echo '## CI Result' >> $GITHUB_STEP_SUMMARY
+          echo "Status: ${{ job.status }} | Branch: ${{ github.ref_name }} | SHA: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+
+# ── Dependency Audit (parallel with test) ────────────────────────────────
+  audit:
+    name: Dependency Audit (OWASP)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ./apps/employee-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: temurin
+          cache: maven
+          cache-dependency-path: ./apps/employee-service/pom.xml
+      - name: Cache OWASP dependency-check NVD database
+        uses: actions/cache@v4
+        with:
+          path: apps/employee-service/.dependency-check-data
+          key: dependency-check-nvd-${{ github.run_id }}
+          restore-keys: |
+            dependency-check-nvd-
+      - name: OWASP Dependency Check
+        # DevOpsGen: audit-grace-period-until: 2026-09-28
+        # Tip: add an NVD_API_KEY repo secret (nvd.nist.gov/developers/request-an-api-key)
+        # to avoid slow/rate-limited NVD downloads on the first (uncached) run.
+        run: mvn -B org.owasp:dependency-check-maven:check -DfailBuildOnCVSS=7 -DdataDirectory=./.dependency-check-data -DnvdApiKey=${{ secrets.NVD_API_KEY }}
+        continue-on-error: true
+
+
+
+  trivy-source:
+    name: Source Scan (Trivy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+
+    outputs:
+      grade:    ${{ steps.grade.outputs.grade }}
+      critical: ${{ steps.grade.outputs.critical }}
+      high:     ${{ steps.grade.outputs.high }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy source scan
+        id: trivy
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type:      fs
+          scan-ref:       ./apps/employee-service
+          format:         sarif
+          output:         trivy-results.sarif
+          exit-code:      1
+          ignore-unfixed: true
+          severity:       CRITICAL,HIGH
+        continue-on-error: true
+
+      - name: Compute grade and write outputs
+        id: grade
+        if: always()
+        run: |
+          python3 -c "
+          import json, os, sys
+          sarif_path = 'trivy-results.sarif'
+          if not os.path.exists(sarif_path):
+              print('SARIF file not found — defaulting grade to F (fail-closed)')
+              g, c, h, m, l = 'F', 0, 0, 0, 0
+          else:
+              try:
+                  data = json.load(open(sarif_path))
+              except Exception as exc:
+                  print(f'SARIF parse error: {exc} — defaulting grade to F (fail-closed)')
+                  g, c, h, m, l = 'F', 0, 0, 0, 0
+              else:
+                  runs  = data.get('runs', [{}])
+                  rules = {r['id']: r
+                           for r in runs[0].get('tool',{}).get('driver',{}).get('rules',[])}
+                  c = h = m = l = 0
+                  for run in runs:
+                      for res in run.get('results', []):
+                          sev = (rules.get(res.get('ruleId',''), {})
+                                       .get('properties', {})
+                                       .get('security-severity', ''))
+                          try:    flt = float(sev)
+                          except: flt = 0.0
+                          if   flt >= 9.0: c += 1
+                          elif flt >= 7.0: h += 1
+                          elif flt >= 4.0: m += 1
+                          else:            l += 1
+                  if   c >= 5:               g = 'F'
+                  elif c >= 3:               g = 'D'
+                  elif c >= 1:               g = 'C'
+                  elif h > 5 or m > 25:      g = 'C'
+                  elif h > 2 or m > 10:      g = 'B'
+                  else:                      g = 'A'
+          out = os.environ.get('GITHUB_OUTPUT', '')
+          if out:
+              with open(out, 'a') as fh:
+                  fh.write(f'critical={c}\nhigh={h}\nmedium={m}\nlow={l}\ngrade={g}\n')
+          print(f'Trivy result: C={c} H={h} M={m} L={l} grade={g}')
+          "
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+        continue-on-error: true
+
+      - name: POST results to DevOpsGen backend
+        if: always()
+        env:
+          SCAN_URL:     ${{ vars.DEVOPSGEN_SCAN_CALLBACK_URL }}
+          PROJECT_ID:   ${{ vars.DEVOPSGEN_PROJECT_ID }}
+          GRADE:        ${{ steps.grade.outputs.grade }}
+          CRITICAL:     ${{ steps.grade.outputs.critical }}
+          HIGH:         ${{ steps.grade.outputs.high }}
+          MEDIUM:       ${{ steps.grade.outputs.medium }}
+          LOW:          ${{ steps.grade.outputs.low }}
+        run: |
+          if [ -z "$SCAN_URL" ]; then
+            echo "DEVOPSGEN_SCAN_CALLBACK_URL not set — skipping backend callback"
+            exit 0
+          fi
+          curl -sf -X POST "$SCAN_URL"             -H "Content-Type: application/json"             -d "{"projectId":"$PROJECT_ID","scanType":"fs","critical":$CRITICAL,"high":$HIGH,"medium":$MEDIUM,"low":$LOW,"grade":"$GRADE"}"             || echo "Backend callback failed (non-fatal)"

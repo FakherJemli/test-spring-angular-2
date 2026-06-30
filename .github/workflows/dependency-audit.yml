@@ -1,0 +1,48 @@
+name: Weekly Dependency Audit
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'  # Every Monday at 08:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: temurin
+          cache: maven
+      - name: npm audit (apps/employee-front-end)
+        run: npm ci --legacy-peer-deps && npm audit --audit-level=high
+        working-directory: ./apps/employee-front-end
+        continue-on-error: true
+      - name: OWASP dependency check (apps/employee-service)
+        run: mvn -B org.owasp:dependency-check-maven:check -DfailBuildOnCVSS=7
+        working-directory: ./apps/employee-service
+        continue-on-error: true
+
+      - name: Open issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '\uD83D\uDD12 Dependency vulnerabilities detected in weekly audit',
+              body: 'Weekly dependency audit found vulnerabilities. See run: ' + context.serverUrl + '/' + context.repo.owner + '/' + context.repo.repo + '/actions/runs/' + context.runId,
+              labels: ['security', 'dependencies']
+            })
